@@ -1,0 +1,4 @@
+web3==5.22.0
+aiohttp==3.7.4.post0
+aiohttp-rpc==1.0.0
+beautifulsoup4==4.9.3
