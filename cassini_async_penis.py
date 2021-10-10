@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 
 SEED = os.environ["SEED"]
 
-rpc_addr = "https://cassini.crypto.org:8545/"
+RPC_ADDR = "https://cassini.crypto.org:8545/"
 
 
 async def balance_printer(w3c: Web3Client, addr):
@@ -47,49 +47,49 @@ async def balance_printer(w3c: Web3Client, addr):
         await asyncio.sleep(60)
 
 
-async def cro_collector(
-    w3c: Web3Client,
-    addr,
-    amount=100,
-    min_balance=Web3.toWei(0.5, "ether"),
-    interval=600,
-):
-    log = logging.getLogger("cro_collector")
-    log.debug("Started")
-    accounts = []
-    for i in range(amount):
-        account = w3c.from_mnemonic(i)
-        log.debug(f"New donor {account.address}")
-        accounts.append(account)
-    while True:
-        for acct in accounts:
-            if acct.address == addr:
-                continue
-            try:
-                balance = await w3c.get_balance(acct.address)
-                log.debug(
-                    f"Balance of {acct.address} is {Web3.fromWei(balance, 'ether')} ethers"
-                )
-                if balance < min_balance:
-                    continue
-                value = balance - min_balance
-                log.info(
-                    f"Sending {Web3.fromWei(value, 'ether')} from {acct.address} to {addr}"
-                )
-                tx = TxParams(
-                    {
-                        "to": addr,
-                        "value": value,
-                        "nonce": await w3c.get_nonce(acct.address),
-                        "gas": 21000,
-                        "gasPrice": Web3.toWei(5000, "gwei"),
-                    }
-                )
-                signed_tx = w3c.sign_transaction(tx, acct.privateKey)
-                await w3c.send_raw_transaction(signed_tx.rawTransaction)
-            except Exception as e:
-                log.error(e)
-        await asyncio.sleep(interval)
+# async def cro_collector(
+#     w3c: Web3Client,
+#     addr,
+#     amount=100,
+#     min_balance=Web3.toWei(0.5, "ether"),
+#     interval=600,
+# ):
+#     log = logging.getLogger("cro_collector")
+#     log.debug("Started")
+#     accounts = []
+#     for i in range(amount):
+#         account = w3c.from_mnemonic(n=i)
+#         log.debug(f"New donor {account.address}")
+#         accounts.append(account)
+#     while True:
+#         for acct in accounts:
+#             if acct.address == addr:
+#                 continue
+#             try:
+#                 balance = await w3c.get_balance(acct.address)
+#                 log.debug(
+#                     f"Balance of {acct.address} is {Web3.fromWei(balance, 'ether')} ethers"
+#                 )
+#                 if balance < min_balance:
+#                     continue
+#                 value = balance - min_balance
+#                 log.info(
+#                     f"Sending {Web3.fromWei(value, 'ether')} from {acct.address} to {addr}"
+#                 )
+#                 tx = TxParams(
+#                     {
+#                         "to": addr,
+#                         "value": value,
+#                         "nonce": await w3c.get_nonce(acct.address),
+#                         "gas": 21000,
+#                         "gasPrice": Web3.toWei(5000, "gwei"),
+#                     }
+#                 )
+#                 signed_tx = w3c.sign_transaction(tx, acct.privateKey)
+#                 await w3c.send_raw_transaction(signed_tx.rawTransaction)
+#             except Exception as e:
+#                 log.error(e)
+#         await asyncio.sleep(interval)
 
 
 async def block_provider(w3c: Web3Client, queue, interval=0.1):
@@ -140,7 +140,7 @@ async def txs_sender(
 
 
 async def main():
-    w3c = Web3Client(http_addr=rpc_addr, seed=SEED)
+    w3c = Web3Client(http_addr=RPC_ADDR, seed=SEED)
     account = w3c.from_mnemonic(0)
     penis_addr = "0x3Dda4dB649A204409E00e68358413ab10ef13cC7"
     with open("contracts/PenisCoin_abi.json") as abi_file:
@@ -159,17 +159,20 @@ async def main():
     proto_tx["gas"] = eth_utils.to_hex(gas)
 
     block_number_q = asyncio.Queue(maxsize=1)
-    tasks = [
-        asyncio.create_task(balance_printer(w3c, account.address)),
-        asyncio.create_task(cro_collector(w3c, account.address)),
-        asyncio.create_task(block_provider(w3c, block_number_q)),
-        asyncio.create_task(
-            txs_sender(w3c, account, block_number_q, proto_tx, batch_size=5)
-        ),
-    ]
+    asyncio.create_task(balance_printer(w3c, account.address))
+    # asyncio.create_task(cro_collector(w3c, account.address))
+    asyncio.create_task(block_provider(w3c, block_number_q))
+    asyncio.create_task(
+        txs_sender(w3c, account, block_number_q, proto_tx, batch_size=5)
+    )
+    try:
+        await asyncio.sleep(float("inf"))
+    finally:
+        await w3c.close()
 
-    while True:
-        await asyncio.sleep(1)
 
-
-asyncio.run(main())
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
