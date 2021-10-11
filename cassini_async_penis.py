@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import eth_utils
+import aiohttp
 from aiohttp_rpc.errors import JsonRpcError
 from web3 import Web3
 from web3.types import TxParams
@@ -47,49 +48,29 @@ async def balance_printer(w3c: Web3Client, addr):
         await asyncio.sleep(60)
 
 
-# async def cro_collector(
-#     w3c: Web3Client,
-#     addr,
-#     amount=100,
-#     min_balance=Web3.toWei(0.5, "ether"),
-#     interval=600,
-# ):
-#     log = logging.getLogger("cro_collector")
-#     log.debug("Started")
-#     accounts = []
-#     for i in range(amount):
-#         account = w3c.from_mnemonic(n=i)
-#         log.debug(f"New donor {account.address}")
-#         accounts.append(account)
-#     while True:
-#         for acct in accounts:
-#             if acct.address == addr:
-#                 continue
-#             try:
-#                 balance = await w3c.get_balance(acct.address)
-#                 log.debug(
-#                     f"Balance of {acct.address} is {Web3.fromWei(balance, 'ether')} ethers"
-#                 )
-#                 if balance < min_balance:
-#                     continue
-#                 value = balance - min_balance
-#                 log.info(
-#                     f"Sending {Web3.fromWei(value, 'ether')} from {acct.address} to {addr}"
-#                 )
-#                 tx = TxParams(
-#                     {
-#                         "to": addr,
-#                         "value": value,
-#                         "nonce": await w3c.get_nonce(acct.address),
-#                         "gas": 21000,
-#                         "gasPrice": Web3.toWei(5000, "gwei"),
-#                     }
-#                 )
-#                 signed_tx = w3c.sign_transaction(tx, acct.privateKey)
-#                 await w3c.send_raw_transaction(signed_tx.rawTransaction)
-#             except Exception as e:
-#                 log.error(e)
-#         await asyncio.sleep(interval)
+async def address_provider(w3c: Web3Client, q: asyncio.Queue):
+    log = logging.getLogger("address_provider")
+    log.debug("Started")
+    url_base = "https://raw.githubusercontent.com/crypto-org-chain/cassini/main"
+
+    async def do_line(b: bytes):
+        addr = b.decode("utf-8").strip()
+        if w3c.w3.isChecksumAddress(addr):
+            await q.put(addr)
+
+    while True:
+        try:
+            async with aiohttp.ClientSession(raise_for_status=True) as session:
+                async with session.get(f"{url_base}/builderList.csv") as response:
+                    log.info("Feeding addresses from builders list")
+                    async for line in response.content:
+                        await do_line(line)
+                async with session.get(f"{url_base}/testerList.csv") as response:
+                    log.info("Feeding addresses from testers list")
+                    async for line in response.content:
+                        await do_line(line)
+        except Exception as e:
+            log.error(e)
 
 
 async def block_provider(w3c: Web3Client, queue, interval=0.1):
@@ -113,13 +94,18 @@ async def block_provider(w3c: Web3Client, queue, interval=0.1):
 
 
 async def txs_sender(
-    w3c: Web3Client, account, block_q: asyncio.Queue, proto_tx: TxParams, batch_size=1
+    w3c: Web3Client,
+    account,
+    address_q: asyncio.Queue,
+    block_q: asyncio.Queue,
+    proto_tx: TxParams,
+    batch_size=1,
 ):
     log = logging.getLogger("txs_sender")
     log.debug("Started")
     while True:
         try:
-            await block_q.get()
+            block_number = await block_q.get()
             block_q.task_done()
             nonce = await w3c.get_nonce(account.address, state="pending")
             ns = list(range(nonce, nonce + batch_size))
@@ -127,6 +113,10 @@ async def txs_sender(
             for n in ns:
                 tx = proto_tx.copy()
                 tx["nonce"] = eth_utils.to_hex(n)
+                tx["to"] = await address_q.get()
+                if block_number in [119999, 120000, 179999, 180000]:
+                    tx["gasPrice"] = eth_utils.to_hex(Web3.toWei(50000, "gwei"))
+
                 signed_tx = w3c.sign_transaction(tx, account.privateKey)
                 signed_txs.append(signed_tx)
 
@@ -158,12 +148,13 @@ async def main():
     gas = await w3c.estimate_gas(proto_tx)
     proto_tx["gas"] = eth_utils.to_hex(gas)
 
+    address_q = asyncio.Queue(maxsize=100)
     block_number_q = asyncio.Queue(maxsize=1)
     asyncio.create_task(balance_printer(w3c, account.address))
-    # asyncio.create_task(cro_collector(w3c, account.address))
+    asyncio.create_task(address_provider(w3c, address_q))
     asyncio.create_task(block_provider(w3c, block_number_q))
     asyncio.create_task(
-        txs_sender(w3c, account, block_number_q, proto_tx, batch_size=5)
+        txs_sender(w3c, account, address_q, block_number_q, proto_tx, batch_size=10)
     )
     try:
         await asyncio.sleep(float("inf"))

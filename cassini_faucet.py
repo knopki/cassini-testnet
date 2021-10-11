@@ -94,13 +94,16 @@ async def faucet_poster(
                         log.warning(
                             f"Faucet gateway timeout for address {account.address}"
                         )
-                        await donors_q.put(account)
+                        # await donors_q.put(account) # may be OK?
+                        await asyncio.sleep(60)  # back pressure
                     elif resp.status < 300:
                         log.info(f"Successfully submited for address {account.address}")
                         await good_c_q.put(captcha_id)
                         await donors_q.put(account)
                     else:
-                        raise RuntimeError(f"Faucet response with unknown status {resp.status}")
+                        raise RuntimeError(
+                            f"Faucet response with unknown status {resp.status}"
+                        )
             except Exception as e:
                 log.error(e)
             acct_q.task_done()
@@ -151,11 +154,12 @@ async def balance_accumulator(
                     )
                     break
                 balance = await w3c.get_balance(acct.address)
+                log.debug(f"Balance of {acct.address} is {balance}")
                 if balance <= min_balance:
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(30)
             if balance <= min_balance:
                 q.task_done()
-                break
+                continue
 
             value = balance - min_balance
             log.info(
@@ -184,11 +188,12 @@ async def main():
     )
     target_addr = w3c.from_mnemonic(n=0).address
 
-    acct_q = asyncio.Queue(maxsize=10)
-    captcha_q = asyncio.Queue(maxsize=3)
+    work_fact = 10
+    acct_q = asyncio.Queue(maxsize=work_fact)
+    captcha_q = asyncio.Queue(maxsize=work_fact)
     good_captcha_q = asyncio.Queue()
     bad_captcha_q = asyncio.Queue()
-    donors_q = asyncio.Queue()
+    donors_q = asyncio.Queue(maxsize=work_fact)
 
     asyncio.create_task(account_generator(w3c, acct_q)),
     for i in range(2):
@@ -198,9 +203,8 @@ async def main():
         asyncio.create_task(
             bad_captcha_report(f"bad_captcha_reporter-{i}", rc, bad_captcha_q)
         )
-    for i in range(3):
+    for i in range(work_fact):
         asyncio.create_task(captcha_requester(f"captcha_requester-{i}", rc, captcha_q))
-    for i in range(5):
         asyncio.create_task(
             faucet_poster(
                 f"faucet_poster-{i}",
@@ -211,7 +215,7 @@ async def main():
                 donors_q,
             )
         )
-    for i in range(20):
+    for i in range(work_fact * 5):
         asyncio.create_task(
             balance_accumulator(f"balance_accumulator-{i}", w3c, target_addr, donors_q)
         )
