@@ -1,4 +1,9 @@
-web3==5.22.0
-aiohttp==3.7.4.post0
 aiohttp-rpc==1.0.0
-beautifulsoup4==4.9.3
+aiohttp==3.7.4.post0
+aioredis==2.0.0
+arq==0.21
+async-timeout==3.0.1
+prometheus-client==0.11.0
+pydantic==1.8.2
+watchgod==0.7
+web3==5.22.0

@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 
+import logging
 import asyncio
 import functools
 import eth_utils
 import aiohttp
 import aiohttp_rpc
-from typing import List
+from datetime import datetime, timedelta
+from operator import attrgetter
+from typing import List, Optional
 from aiohttp_rpc.protocol import JsonRpcRequest, JsonRpcBatchRequest
 from hexbytes import HexBytes
-from web3 import Web3
+from web3.auto import Web3
 from web3.types import TxParams, TxReceipt, BlockData, SignedTx
+
+log = logging.getLogger(__name__)
 
 
 def run_in_executor(f):
@@ -21,10 +26,19 @@ def run_in_executor(f):
     return inner
 
 
+class JsonRpcErrorList(Exception):
+    def __init__(self, errs):
+        super().__init__(errs)
+        self.errors = errs
+
+
 class Web3Client:
     http_addr: str
     w3: Web3
     seed: str
+    errors: float = 0
+    clients: List["Web3Client"]
+    timeout = aiohttp.ClientTimeout(total=10, sock_connect=10, sock_read=10, connect=10)
 
     def __init__(self, http_addr: str, seed=None) -> None:
         self.http_addr = http_addr
@@ -35,18 +49,40 @@ class Web3Client:
             self.seed = seed
         self.session = None
         self.rpc = None
+        self.clients = []
 
     async def _init_rpc(self) -> None:
         if self.session is None:
-            self.session = aiohttp.ClientSession(raise_for_status=True)
+            self.session = aiohttp.ClientSession(
+                raise_for_status=True, timeout=self.timeout
+            )
         if self.rpc is None:
-            self.rpc = aiohttp_rpc.JsonRpcClient(self.http_addr, session=self.session)
+            self.rpc = aiohttp_rpc.JsonRpcClient(self.http_addr, session=self.session, timeout=self.timeout)
+            self.rpc.session = self.session
+            self.rpc._session_is_outer = True
 
     async def close(self) -> None:
         if self.rpc:
             await self.rpc.disconnect()
-        if self.session:
+        if self.session and not self.session.closed:
             await self.session.close()
+        pending_clients = [x for x in self.clients if x.session and not x.session.closed]
+        for client in pending_clients:
+            await client.close()
+
+    @classmethod
+    def init_balanced(cls, endpoints, seed=None):
+        batch = []
+        for endpoint in endpoints:
+            client = Web3Client(http_addr=endpoint, seed=seed)
+            client.clients = batch
+            batch.append(client)
+        return batch[0]
+
+    def balanced(self):
+        sorted_list = sorted(self.clients, key=attrgetter("errors"))
+        new_client = sorted_list[0]
+        return new_client
 
     def from_mnemonic(self, seed=None, account_path=None, acct_n=0, n=0):
         seed = seed or self.seed
@@ -72,6 +108,11 @@ class Web3Client:
     async def estimate_gas(self, params: TxParams) -> int:
         await self._init_rpc()
         result = await self.rpc.eth_estimateGas(params)
+        return eth_utils.to_int(hexstr=result)
+
+    async def get_gas_price(self) -> int:
+        await self._init_rpc()
+        result = await self.rpc.eth_gasPrice()
         return eth_utils.to_int(hexstr=result)
 
     def sign_transaction(self, tx: TxParams, key: str) -> SignedTx:
@@ -107,7 +148,7 @@ class Web3Client:
 
         errors = [x.error for x in result.responses if x.error]
         if errors:
-            raise RuntimeError(errors)
+            raise JsonRpcErrorList(errors)
 
         return [eth_utils.to_hex(hexstr=x.result) for x in result.responses]
 
@@ -129,13 +170,16 @@ class Web3Client:
         return TxReceipt(response.result)
 
     async def wait_for_transaction_receipt(
-        self, tx_hash: str, interval=0.1
-    ) -> TxReceipt:
+            self, tx_hash: str, interval=0.1, timeout=120
+    ) -> Optional[TxReceipt]:
         result = None
+        deadline = datetime.now() + timedelta(seconds=timeout)
         while not result:
             result = await self.get_transaction_receipt(tx_hash)
             if result:
                 return result
+            if datetime.now() + timedelta(seconds=interval) > deadline:
+                return None
             await asyncio.sleep(interval)
 
     async def get_block_by_number(self, qty="latest", full=False) -> BlockData:
