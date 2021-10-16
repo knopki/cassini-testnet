@@ -11,7 +11,7 @@ from web3tools import Web3Client
 from rucaptcha import RuCaptchaV2
 
 SEED = os.environ["SEED"]
-RPC_ADDR = "https://cassini.crypto.org:8545/"
+RPC_ADDR = "http://localhost:8545/"
 FAUCET_API_URL = os.environ["FAUCET_API_URL"]
 FAUCET_SITE_URL = os.environ["FAUCET_SITE_URL"]
 FAUCET_SITE_KEY = os.environ["FAUCET_SITE_KEY"]
@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 
 async def account_generator(w3c: Web3Client, acct_q: asyncio.Queue):
-    log = logging.getLogger("account_generator")
+    log = logging.getLogger(asyncio.current_task().get_name())
     log.debug("Started")
     n = 0
     ts = int(datetime.now().timestamp())
@@ -37,8 +37,8 @@ async def account_generator(w3c: Web3Client, acct_q: asyncio.Queue):
         n += 1
 
 
-async def captcha_requester(name: str, rc: RuCaptchaV2, q: asyncio.Queue):
-    log = logging.getLogger(name)
+async def captcha_requester(rc: RuCaptchaV2, q: asyncio.Queue):
+    log = logging.getLogger(asyncio.current_task().get_name())
     log.debug("Started")
     while True:
         try:
@@ -55,14 +55,13 @@ async def captcha_requester(name: str, rc: RuCaptchaV2, q: asyncio.Queue):
 
 
 async def faucet_poster(
-    name: str,
     captcha_q: asyncio.Queue,
     good_c_q: asyncio.Queue,
     bad_c_q: asyncio.Queue,
     acct_q: asyncio.Queue,
     donors_q: asyncio.Queue,
 ):
-    log = logging.getLogger(name)
+    log = logging.getLogger(asyncio.current_task().get_name())
     log.debug("Started")
     headers = {
         "authority": "cronos.crypto.org",
@@ -94,12 +93,12 @@ async def faucet_poster(
                         log.warning(
                             f"Faucet gateway timeout for address {account.address}"
                         )
-                        # await donors_q.put(account) # may be OK?
-                        await asyncio.sleep(60)  # back pressure
+                        # await donors_q.put(account)  # may be OK?
+                        # await asyncio.sleep(60)  # back pressure
                     elif resp.status < 300:
                         log.info(f"Successfully submited for address {account.address}")
                         await good_c_q.put(captcha_id)
-                        await donors_q.put(account)
+                        # await donors_q.put(account)
                     else:
                         raise RuntimeError(
                             f"Faucet response with unknown status {resp.status}"
@@ -110,8 +109,8 @@ async def faucet_poster(
             captcha_q.task_done()
 
 
-async def good_captcha_report(name, rc: RuCaptchaV2, q: asyncio.Queue):
-    log = logging.getLogger(name)
+async def good_captcha_report(rc: RuCaptchaV2, q: asyncio.Queue):
+    log = logging.getLogger(asyncio.current_task().get_name())
     log.debug("Started")
     while True:
         captcha_id = await q.get()
@@ -123,8 +122,8 @@ async def good_captcha_report(name, rc: RuCaptchaV2, q: asyncio.Queue):
         q.task_done()
 
 
-async def bad_captcha_report(name, rc: RuCaptchaV2, q: asyncio.Queue):
-    log = logging.getLogger(name)
+async def bad_captcha_report(rc: RuCaptchaV2, q: asyncio.Queue):
+    log = logging.getLogger(asyncio.current_task().get_name())
     log.debug("Started")
     while True:
         captcha_id = await q.get()
@@ -137,9 +136,9 @@ async def bad_captcha_report(name, rc: RuCaptchaV2, q: asyncio.Queue):
 
 
 async def balance_accumulator(
-    name: str, w3c: Web3Client, addr: str, q: asyncio.Queue, timeout=600
+    w3c: Web3Client, addr: str, q: asyncio.Queue, timeout=3600
 ):
-    log = logging.getLogger(name)
+    log = logging.getLogger(asyncio.current_task().get_name())
     log.debug("Started")
     min_balance = Web3.toWei(0.3, "ether")
     stop = datetime.now() + timedelta(seconds=timeout)
@@ -147,17 +146,13 @@ async def balance_accumulator(
         acct = await q.get()
         try:
             balance = 0
-            while balance <= min_balance:
-                if datetime.now() > stop:
-                    log.warning(
-                        f"Address {acct.address} was timed out with small balance"
-                    )
-                    break
+            while balance <= min_balance and datetime.now() < stop:
                 balance = await w3c.get_balance(acct.address)
                 log.debug(f"Balance of {acct.address} is {balance}")
                 if balance <= min_balance:
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(10)
             if balance <= min_balance:
+                log.warning(f"Address {acct.address} balance is too small - skip")
                 q.task_done()
                 continue
 
@@ -182,46 +177,67 @@ async def balance_accumulator(
 
 
 async def main():
+    asyncio.current_task().set_name("main")
     w3c = Web3Client(http_addr=RPC_ADDR, seed=SEED)
     rc = RuCaptchaV2(
         key=RUCAPTCHA_API_KEY, site_key=FAUCET_SITE_KEY, url=FAUCET_SITE_URL
     )
-    target_addr = w3c.from_mnemonic(n=0).address
+    target_addr = w3c.from_mnemonic(n=12).address
 
     work_fact = 10
-    acct_q = asyncio.Queue(maxsize=work_fact)
+    acct_q = asyncio.Queue(maxsize=1)
     captcha_q = asyncio.Queue(maxsize=work_fact)
     good_captcha_q = asyncio.Queue()
     bad_captcha_q = asyncio.Queue()
-    donors_q = asyncio.Queue(maxsize=work_fact)
+    donors_q = asyncio.Queue(maxsize=1)
 
-    asyncio.create_task(account_generator(w3c, acct_q)),
+    asyncio.create_task(account_generator(w3c, acct_q), name="account_generator"),
     for i in range(2):
         asyncio.create_task(
-            good_captcha_report(f"good_captcha_reporter-{i}", rc, good_captcha_q)
+            good_captcha_report(rc, good_captcha_q), name=f"good_captcha_reporter-{i}"
         )
         asyncio.create_task(
-            bad_captcha_report(f"bad_captcha_reporter-{i}", rc, bad_captcha_q)
+            bad_captcha_report(rc, bad_captcha_q), name=f"bad_captcha_reporter-{i}"
         )
     for i in range(work_fact):
-        asyncio.create_task(captcha_requester(f"captcha_requester-{i}", rc, captcha_q))
+        asyncio.create_task(
+            captcha_requester(rc, captcha_q), name=f"captcha_requester-{i}"
+        )
         asyncio.create_task(
             faucet_poster(
-                f"faucet_poster-{i}",
                 captcha_q,
                 good_captcha_q,
                 bad_captcha_q,
                 acct_q,
                 donors_q,
-            )
+            ),
+            name=f"faucet_poster-{i}",
         )
-    for i in range(work_fact * 5):
-        asyncio.create_task(
-            balance_accumulator(f"balance_accumulator-{i}", w3c, target_addr, donors_q)
-        )
+    # for i in range(work_fact * 50):
+    #     asyncio.create_task(
+    #         balance_accumulator(w3c, target_addr, donors_q),
+    #         name=f"balance_accumulator-{i}",
+    #     )
 
     try:
-        await asyncio.sleep(float("inf"))
+        while True:
+            log.info(
+                "Q: CAPTCHA new {}/good {}/bad {}; ACCOUNTS new {}/donors {}".format(
+                    captcha_q.qsize(),
+                    good_captcha_q.qsize(),
+                    bad_captcha_q.qsize(),
+                    acct_q.qsize(),
+                    donors_q.qsize(),
+                )
+            )
+            task_map = {}
+            for task in asyncio.all_tasks():
+                if task.done():
+                    continue
+                name = task.get_name().split("-")[0]
+                task_map[name] = task_map.get(name) + 1 if task_map.get(name) else 1
+            log.info(f"Tasks: {task_map}")
+            await asyncio.sleep(10)
     finally:
         await rc.close()
         await w3c.close()
