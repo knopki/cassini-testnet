@@ -1,5 +1,5 @@
 {
-  description = "Stock shiit";
+  description = "Cassini testnet";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/release-21.05";
@@ -33,6 +33,7 @@
           pkgs = nixpkgsFor.${system};
           mach-nix-utils = mach-nix.lib.${system};
           myPython = mach-nix-utils.mkPython {
+            ignoreDataOutdated = true;
             requirements = concatStringsSep "\n" [
               (builtins.readFile ./requirements.txt)
               # "black"
