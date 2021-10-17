@@ -14,6 +14,7 @@ from aiohttp import (
     ClientSSLError,
     ClientConnectionError,
     ClientConnectorSSLError,
+    ClientResponseError,
 )
 from datetime import datetime, timedelta
 from aiohttp_rpc.errors import JsonRpcError
@@ -39,6 +40,7 @@ net_errors = (
     ClientSSLError,
     ClientConnectionError,
     ClientConnectorSSLError,
+    ClientResponseError,
     asyncio.TimeoutError,
 )
 
@@ -54,31 +56,59 @@ log = logging.getLogger(__name__)
 
 SEED = os.environ["SEED"]
 ACCN = int(os.environ.get("N", 0))
-PUBLIC_RPC = os.environ.get("PUBLIC_RPC", False)
+CONTRACT_NAME = os.environ.get("CONTRACT_NAME", "penis_coin")
 
 RPC_ADDRS = [
     "http://localhost:8545/",
     "https://cassini.crypto.org:8545/",
-    # "http://138.197.110.129:8545/", # syncing
-    # "http://144.91.78.195:8545/", # connection error
-    "http://164.68.102.64:8545/",
-    "http://164.68.114.113:8545/",
-    "http://164.68.117.58:8545/",
-    "http://18.141.166.179:8545/",
+    "http://164.68.102.64:8545/",   # Solaris
+    "http://164.68.117.58:8545/",   # Polli
+    "http://23.88.109.222:8545/",
     "http://188.165.217.174:8545/",
+    "http://138.197.110.129:8545/", # green
+    "http://138.68.110.168:8545/",
+    "http://164.68.114.113:8545/",  # Bugiman
     "http://194.163.182.24:8545/",
+    "http://95.217.17.145:8545/",   # cassini
     "http://46.21.255.58:8545/",
-    "http://49.12.224.41:8545/",
-    "http://95.217.17.145:8545/",
+    "http://18.141.166.179:8545/",
+    "http://144.91.78.195:8545/",
 ]
 random.shuffle(RPC_ADDRS)
 
 
-def get_contract(w3c: Web3Client):
-    penis_addr = "0x3Dda4dB649A204409E00e68358413ab10ef13cC7"
-    with open("contracts/PenisCoin_abi.json") as abi_file:
-        penis_abi = json.load(abi_file)
-    return w3c.w3.eth.contract(address=penis_addr, abi=penis_abi), penis_addr
+def get_contract(w3c: Web3Client, name="penis_coin"):
+    contracts = {
+        "penis_coin": {
+            "address": "0x3Dda4dB649A204409E00e68358413ab10ef13cC7",
+            "abi_filename": "contracts/PenisCoin_abi.json",
+            "method_name": "approve",
+        },
+        "A": {
+            "address": "0x4c80b48B47e3D88f42C37E6cBc890148284C25d6",
+            "abi_filename": "contracts/A_abi.json",
+            "method_name": "a",
+        },
+        "B": {
+            "address": "0xb0e337b5CA3789a21656b0B52D7bF86b9298fc36",
+            "abi_filename": "contracts/B_abi.json",
+            "method_name": "b",
+        },
+        "C": {
+            "address": "0x2d7368714a108fbF7ec18582005e29DBAC93A54A",
+            "abi_filename": "contracts/C_abi.json",
+            "method_name": "c",
+        },
+    }
+    contract = contracts[name]
+    addr = contract["address"]
+    with open(contract["abi_filename"]) as abi_file:
+        contract["abi"] = json.load(abi_file)
+    contract["contract"] = w3c.w3.eth.contract(
+        address=contract["address"], abi=contract["abi"]
+    )
+    contract["method"] = contract["contract"].functions[contract["method_name"]]
+    return contract
 
 
 async def get_metrics(w3c: Web3Client):
@@ -194,11 +224,11 @@ async def txs_sender(
 ):
     log = logging.getLogger(asyncio.current_task().get_name())
     log.debug("Started")
-
     err_counter = 0
-    target_pending_receipts = 100
+    target_pending_receipts = 1000
     batch_size = 10
-    max_batch_size = 50
+    max_batch_size = 100
+    receipt_timeout = 120
 
     async def get_nonce(w3c):
         pending_nonce = await w3c.get_nonce(account.address, state="pending")
@@ -206,16 +236,17 @@ async def txs_sender(
         nonce = max(pending_nonce, latest_nonce)
         return nonce, pending_nonce, latest_nonce
 
-    penis_contract, penis_addr = get_contract(w3c)
-    # method = penis_contract.functions.transfer(account.address,Web3.toWei(1, "ether"))
-    method = penis_contract.functions.approve(account.address, Web3.toWei(1, "ether"))
-    # gas_price = await w3c.get_gas_price()
+    contract_meta = get_contract(w3c, name=CONTRACT_NAME)
+    method_opts = []
+    if CONTRACT_NAME == "penis_coin":
+        method_opts = [account.address, Web3.toWei(1, "ether")]
+    call = contract_meta["method"](*method_opts)
     proto_tx = TxParams(
         {
             "chainId": eth_utils.to_hex(339),
             "from": account.address,
-            "to": penis_addr,
-            "data": method._encode_transaction_data(),
+            "to": contract_meta["address"],
+            "data": call._encode_transaction_data(),
             "gasPrice": eth_utils.to_hex(Web3.toWei(5100, "gwei")),
             "gas": eth_utils.to_hex(Web3.toWei(100000, "gwei")),
             "value": eth_utils.to_hex(0),
@@ -247,8 +278,6 @@ async def txs_sender(
             log.info(f"Sending batch of {batch_size} txs")
             for _ in range(batch_size):
                 tx = proto_tx.copy()
-                # method = penis_contract.functions.transfer(target_addr, Web3.toWei(0.1, "ether"))
-                # tx["data"] = method._encode_transaction_data()
                 tx["nonce"] = eth_utils.to_hex(nonce)
                 nonce += 1
                 signed_tx = w3cb.sign_transaction(tx, account.privateKey)
@@ -260,12 +289,14 @@ async def txs_sender(
                 f"Sent batch of {len(tx_hashes)} txs with nonce {nonce}-{nonce+len(tx_hashes)}"
             )
             for tx_hash in tx_hashes:
-                await tx_hash_q.put(tx_hash)
+                await tx_hash_q.put(
+                    (tx_hash, datetime.now() + timedelta(seconds=receipt_timeout))
+                )
 
             err_counter = 0
             w3cb.errors -= 0.1
             batch_size += 1
-            target_pending_receipts += 10
+            target_pending_receipts += 1
             await asyncio.sleep(0.3)
 
         except net_errors as e:
@@ -294,28 +325,86 @@ async def txs_sender(
             batch_size = max(batch_size, 1)
             batch_size = min(batch_size, max_batch_size)
             target_pending_receipts = max(target_pending_receipts, 10)
-            target_pending_receipts = min(target_pending_receipts, tx_hash_q.maxsize)
 
 
-async def receipt_eater(w3c: Web3Client, tx_q: asyncio.Queue, interval=1):
+async def receipt_eater(
+    w3c: Web3Client, tx_q: asyncio.Queue, interval=1, work_size=1, timeout=30
+):
+    log = logging.getLogger(asyncio.current_task().get_name())
+    log.debug("Started")
+    old_http = w3c.http_addr
+    work = []
+    while True:
+        while len(work) < work_size and not tx_q.empty():
+            tx_hash = await tx_q.get()
+            log.debug(f"Processing {tx_hash}")
+            deadline = datetime.now() + timedelta(seconds=timeout)
+            work.append((tx_hash, deadline))
+            tx_q.task_done()
+
+        if not len(work):
+            await asyncio.sleep(1)
+
+        received = []
+        for (tx_hash, deadline) in work:
+            try:
+                # take new client
+                w3cb = w3c.balanced()
+                if old_http != w3cb.http_addr:
+                    log.info(f"RPC endpoint changed: {w3cb.http_addr}")
+                    old_http = w3cb.http_addr
+
+                receipt = await w3cb.get_transaction_receipt(tx_hash)
+                if receipt:
+                    received.append(tx_hash)
+
+            except net_errors as e:
+                w3cb.errors += 1
+                log.error(e)
+                await asyncio.sleep(1)
+            except (JsonRpcErrorList, JsonRpcError) as e:
+                w3cb.errors += 1
+                log.error(e)
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(type(e))
+                print(e)
+                log.error(e)
+
+            await asyncio.sleep(interval / len(work))
+
+        timeouted = [x[0] for x in work if x[1] < datetime.now()]
+        work = [x for x in work if x[0] not in timeouted and x[0] not in received]
+        log.info(
+            f"Pending: {len(work)} Timeouted: {len(timeouted)} Received: {len(received)}"
+        )
+
+
+async def lazy_receipt_eater(w3c: Web3Client, q: asyncio.Queue, interval=0.1):
     log = logging.getLogger(asyncio.current_task().get_name())
     log.debug("Started")
     old_http = w3c.http_addr
     while True:
-        tx_hash = await tx_q.get()
-        log.debug(f"Processing {tx_hash}")
-
-        # take new client
-        w3cb = w3c.balanced()
-        if old_http != w3cb.http_addr:
-            log.info(f"RPC endpoint changed: {w3cb.http_addr}")
-            old_http = w3cb.http_addr
-
+        tx_hash, deadline = await q.get()
+        if deadline < datetime.now():
+            q.task_done()
+            continue
         try:
-            await w3cb.wait_for_transaction_receipt(
-                tx_hash, interval=interval, timeout=30
-            )
+            # take new client
+            w3cb = w3c.balanced()
+            if old_http != w3cb.http_addr:
+                log.info(f"RPC endpoint changed: {w3cb.http_addr}")
+                old_http = w3cb.http_addr
+
+            receipt = await w3cb.get_transaction_receipt(tx_hash)
+            if not receipt:
+                await q.put((tx_hash, deadline))
+
         except net_errors as e:
+            w3cb.errors += 1
+            log.error(e)
+            await asyncio.sleep(1)
+        except (JsonRpcErrorList, JsonRpcError) as e:
             w3cb.errors += 1
             log.error(e)
             await asyncio.sleep(1)
@@ -323,8 +412,9 @@ async def receipt_eater(w3c: Web3Client, tx_q: asyncio.Queue, interval=1):
             print(type(e))
             print(e)
             log.error(e)
-        finally:
-            tx_q.task_done()
+
+        q.task_done()
+        await asyncio.sleep(interval)
 
 
 async def receipt_queue_size_printer(q: asyncio.Queue, interval=10):
@@ -342,7 +432,7 @@ async def main():
 
     # address_q = asyncio.Queue(maxsize=100)
     block_number_q = asyncio.Queue(maxsize=1)
-    tx_hash_q = asyncio.Queue(maxsize=1000)
+    tx_hash_q = asyncio.Queue()
     asyncio.create_task(balance_printer(w3c, account.address), name="balance_printer")
     # asyncio.create_task(address_provider(w3c, address_q))
     asyncio.create_task(
@@ -350,8 +440,16 @@ async def main():
     )
     asyncio.create_task(txs_sender(w3c, account, tx_hash_q), name="txs_sender")
     asyncio.create_task(receipt_queue_size_printer(tx_hash_q), name="receipts_queue")
+    # for i in range(2):
+    #     asyncio.create_task(
+    #         receipt_eater(w3c, tx_hash_q, interval=10, work_size=50, timeout=120),
+    #         name=f"receipt_eater-{i}",
+    #     )
     for i in range(20):
-        asyncio.create_task(receipt_eater(w3c, tx_hash_q), name=f"receipt_eater-{i}")
+        asyncio.create_task(
+            lazy_receipt_eater(w3c, tx_hash_q, interval=5),
+            name=f"receipt_eater-{i}",
+        )
     try:
         await asyncio.sleep(float("inf"))
     finally:
